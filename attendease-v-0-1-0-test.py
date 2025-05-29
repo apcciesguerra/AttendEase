@@ -404,7 +404,7 @@ def create_main_ui():
     root.configure(bg=APC_WHITE)
 
     # Header
-    title_label = tk.Label(root, text="AttendEase by Vector Four (DEMO)", font=("Helvetica", 16, "bold"), bg=APC_WHITE, fg=APC_BLUE)
+    title_label = tk.Label(root, text="AttendEase (DEMO)", font=("Helvetica", 16, "bold"), bg=APC_WHITE, fg=APC_BLUE)
     title_label.pack(pady=(10,0))
 
     # Status
@@ -419,7 +419,7 @@ def create_main_ui():
     toggle_button.pack(pady=10)
 
     # Info label
-    info_label = tk.Label(root, text="Enhanced with face tracking and confidence scoring", 
+    info_label = tk.Label(root, text="by Vector Four", 
                          font=("Helvetica", 10), fg=APC_BLUE, bg=APC_WHITE)
     info_label.pack()
 
