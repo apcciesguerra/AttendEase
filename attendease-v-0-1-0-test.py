@@ -5,6 +5,9 @@ import sys
 import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
+import time
+from collections import defaultdict
+import threading
 
 # --- Global Variables ---
 video_capture = None
@@ -18,11 +21,70 @@ status_label = None
 toggle_button = None
 video_label = None
 
-# Processing flag from original code
-process_this_frame = True 
+# Enhanced tracking variables
+face_tracker = {}  # Dictionary to store face tracking data
+next_face_id = 0
+TRACKING_THRESHOLD = 0.6  # Face recognition confidence threshold
+TRACKING_FRAMES = 10  # Number of frames to keep tracking without detection
+FACE_DISTANCE_THRESHOLD = 100  # Maximum pixel distance for face tracking
 
-# Reference image path (ensure this path is correct)
+# Processing optimization
+process_this_frame = True 
+frame_count = 0
+last_detection_time = time.time()
+
+# Reference image path
 REFERENCE_IMAGE_PATH = "photos/christian_esguerra.jpg"
+
+# --- Color Palette ---
+APC_GOLD = "#D1A134"
+APC_BLUE = "#002B5C"
+APC_WHITE = "#FFFFFF"
+APC_LIGHT_GOLD = "#E6BE5C" # For hover/active states
+APC_DARK_RED_ERROR = "#A00000" # For error messages
+APC_STATUS_GREEN = "#006400" # Dark green for positive status 
+
+# OpenCV BGR Colors
+CV_APC_GOLD = (0x34, 0xA1, 0xD1) # BGR for #D1A134
+CV_APC_BLUE = (0x5C, 0x2B, 0x00) # BGR for #002B5C
+CV_APC_WHITE = (255, 255, 255)
+CV_APC_GREEN_CONFIRMED = (0, 100, 0) # Dark Green for confirmed
+CV_APC_YELLOW_TENTATIVE = (0, 191, 255) # A bright yellow
+CV_APC_RED_UNKNOWN = (0,0,139) # Dark Red for unknown
+
+# --- Enhanced Face Tracking Class ---
+class FaceTracker:
+    def __init__(self, face_id, name, location, encoding=None):
+        self.id = face_id
+        self.name = name
+        self.location = location  # (top, right, bottom, left)
+        self.encoding = encoding
+        self.last_seen = time.time()
+        self.confidence_history = []
+        self.missed_frames = 0
+        self.is_confirmed = False  # True if we're confident this is the right person
+        
+    def update_location(self, new_location, confidence=None):
+        self.location = new_location
+        self.last_seen = time.time()
+        self.missed_frames = 0
+        if confidence is not None:
+            self.confidence_history.append(confidence)
+            if len(self.confidence_history) > 5:
+                self.confidence_history.pop(0)
+            # Mark as confirmed if we have consistent good matches
+            if len(self.confidence_history) >= 3 and all(c > 0.4 for c in self.confidence_history):
+                self.is_confirmed = True
+    
+    def increment_missed_frames(self):
+        self.missed_frames += 1
+        
+    def is_expired(self):
+        return self.missed_frames > TRACKING_FRAMES
+    
+    def get_center(self):
+        top, right, bottom, left = self.location
+        return ((left + right) // 2, (top + bottom) // 2)
 
 # --- Core Functions ---
 
@@ -31,9 +93,6 @@ def load_reference_data():
     global known_face_encodings, known_face_names
     print("📸 Loading reference image...")
     try:
-        # Ensure the 'photos' directory and image exist or adjust the path.
-        # For example, if running from the same directory as the script,
-        # and 'photos' is a subdirectory: "photos/christian_esguerra.jpg"
         christian_image = face_recognition.load_image_file(REFERENCE_IMAGE_PATH)
         print("✓ Reference image loaded successfully.")
         
@@ -47,7 +106,7 @@ def load_reference_data():
         
         christian_face_encoding = face_encodings_list[0]
         known_face_encodings = [christian_face_encoding]
-        known_face_names = ["Christian Esguerra"] # You can make this more dynamic if needed
+        known_face_names = ["Christian Esguerra"]
         
         print(f"✓ Face encoding extracted. {len(known_face_encodings)} known face(s) configured: {known_face_names}")
         return True
@@ -63,18 +122,105 @@ def load_reference_data():
         messagebox.showerror("Load Error", error_msg)
         return False
 
+def calculate_distance(loc1, loc2):
+    """Calculate Euclidean distance between two face locations."""
+    center1 = ((loc1[1] + loc1[3]) // 2, (loc1[0] + loc1[2]) // 2)
+    center2 = ((loc2[1] + loc2[3]) // 2, (loc2[0] + loc2[2]) // 2)
+    return np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
+
+def match_faces_to_trackers(face_locations, face_encodings):
+    """Match detected faces to existing trackers or create new ones."""
+    global face_tracker, next_face_id, known_face_encodings, known_face_names
+    
+    # Scale face locations back to full size
+    scaled_locations = []
+    for (top, right, bottom, left) in face_locations:
+        scaled_locations.append((top * 4, right * 4, bottom * 4, left * 4))
+    
+    # First, try to match with existing trackers based on proximity
+    matched_trackers = set()
+    new_detections = []
+    
+    for i, location in enumerate(scaled_locations):
+        best_tracker = None
+        min_distance = float('inf')
+        
+        # Find closest existing tracker
+        for tracker_id, tracker in face_tracker.items():
+            if tracker_id in matched_trackers:
+                continue
+            distance = calculate_distance(location, tracker.location)
+            if distance < FACE_DISTANCE_THRESHOLD and distance < min_distance:
+                min_distance = distance
+                best_tracker = tracker_id
+        
+        if best_tracker is not None:
+            # Update existing tracker
+            name = "Unknown"
+            confidence = None
+            
+            # Perform face recognition for known faces
+            if i < len(face_encodings) and known_face_encodings:
+                matches = face_recognition.compare_faces(known_face_encodings, face_encodings[i], tolerance=TRACKING_THRESHOLD)
+                face_distances = face_recognition.face_distance(known_face_encodings, face_encodings[i])
+                
+                if len(face_distances) > 0:
+                    best_match_index = np.argmin(face_distances)
+                    if matches[best_match_index]:
+                        name = known_face_names[best_match_index]
+                        confidence = 1 - face_distances[best_match_index]
+            
+            # Update tracker
+            face_tracker[best_tracker].update_location(location, confidence)
+            face_tracker[best_tracker].name = name
+            matched_trackers.add(best_tracker)
+        else:
+            # New face detection
+            new_detections.append((location, face_encodings[i] if i < len(face_encodings) else None))
+    
+    # Create new trackers for unmatched detections
+    for location, encoding in new_detections:
+        name = "Unknown"
+        confidence = None
+        
+        # Perform face recognition for new faces
+        if encoding is not None and known_face_encodings:
+            matches = face_recognition.compare_faces(known_face_encodings, encoding, tolerance=TRACKING_THRESHOLD)
+            face_distances = face_recognition.face_distance(known_face_encodings, encoding)
+            
+            if len(face_distances) > 0:
+                best_match_index = np.argmin(face_distances)
+                if matches[best_match_index]:
+                    name = known_face_names[best_match_index]
+                    confidence = 1 - face_distances[best_match_index]
+        
+        # Create new tracker
+        tracker = FaceTracker(next_face_id, name, location, encoding)
+        if confidence is not None:
+            tracker.update_location(location, confidence)
+        face_tracker[next_face_id] = tracker
+        next_face_id += 1
+    
+    # Increment missed frames for unmatched trackers
+    for tracker_id in list(face_tracker.keys()):
+        if tracker_id not in matched_trackers:
+            face_tracker[tracker_id].increment_missed_frames()
+            # Remove expired trackers
+            if face_tracker[tracker_id].is_expired():
+                del face_tracker[tracker_id]
+
 def check_webcam_status():
     """Checks initial webcam connectivity and updates status_label."""
     global status_label
     print("📹 Checking webcam status...")
-    cap_test = cv2.VideoCapture(0) # Try to open the default camera
+    cap_test = cv2.VideoCapture(0)
     if cap_test.isOpened():
-        status_label.config(text="Webcam: Connected and Ready", fg="green")
+        status_label.config(text="Webcam: Connected and Ready", fg=APC_STATUS_GREEN)
         print("✓ Webcam connected and ready.")
         cap_test.release()
         return True
     else:
-        status_label.config(text="Webcam: Not Detected / Error", fg="red")
+        status_label.config(text="Webcam: Not Detected / Error", fg=APC_DARK_RED_ERROR)
         print("❌ Error: Could not access webcam for initial check.")
         return False
 
@@ -82,215 +228,218 @@ def update_gui_frame(frame_to_display):
     """Converts an OpenCV frame to a Tkinter PhotoImage and updates the video_label."""
     global video_label
     try:
-        # Convert frame from BGR (OpenCV default) to RGB
         cv2image = cv2.cvtColor(frame_to_display, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(cv2image)
         imgtk = ImageTk.PhotoImage(image=img)
         
-        video_label.imgtk = imgtk  # Keep a reference to avoid garbage collection
-        video_label.configure(image=imgtk, text="") # Clear any placeholder text
+        video_label.imgtk = imgtk
+        video_label.configure(image=imgtk, text="")
     except Exception as e:
         print(f"Error updating GUI frame: {e}")
 
-
 def recognize_and_display_video():
-    """Captures a frame, performs face recognition, and schedules the next update."""
+    """Enhanced face recognition with tracking."""
     global video_capture, camera_on, process_this_frame, video_label
-    global known_face_encodings, known_face_names
+    global known_face_encodings, known_face_names, frame_count, face_tracker
 
     if not camera_on or video_capture is None or not video_capture.isOpened():
-        # This check ensures we don't proceed if camera was turned off or failed
         return
 
     ret, frame = video_capture.read()
     if not ret:
         print("❌ Error: Lost connection to webcam or cannot read frame.")
-        # Attempt to turn off camera gracefully through the toggle function
-        # to update UI state correctly.
-        if camera_on: # only toggle if it was supposed to be on
-            toggle_camera() 
-        status_label.config(text="Webcam: Error reading frame", fg="red")
+        if camera_on:
+            toggle_camera()
+        status_label.config(text="Webcam: Error reading frame", fg=APC_DARK_RED_ERROR)
         return
 
-    # Process the frame for face recognition
-    # Make a copy for processing if you modify it before drawing final boxes
-    # frame_for_processing = frame.copy() 
+    frame_count += 1
     
-    # Local lists for detected faces in the current frame
-    face_locations_detected = []
-    face_names_detected = []
-
-    # Original logic: Only process every other frame of video to save time
-    if process_this_frame:
+    # Process face detection every 3rd frame for better performance
+    if frame_count % 3 == 0:
         try:
-            # Resize frame of video to 1/4 size for faster face recognition processing
+            # Resize frame for faster processing
             small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-            # Convert the image from BGR color (OpenCV uses) to RGB color (face_recognition uses)
             rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
             
-            # Find all the faces and face encodings in the current frame of video
-            face_locations_detected = face_recognition.face_locations(rgb_small_frame)
-            current_face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations_detected)
+            # Find faces
+            face_locations = face_recognition.face_locations(rgb_small_frame)
+            current_face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
             
-            for face_encoding in current_face_encodings:
-                name = "Unknown"
-                if known_face_encodings: # Check if there are known faces to compare against
-                    matches = face_recognition.compare_faces(known_face_encodings, face_encoding, tolerance=0.6)
-                    face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-                    
-                    if len(face_distances) > 0: # Ensure distances were calculated
-                        best_match_index = np.argmin(face_distances)
-                        if matches[best_match_index]:
-                            name = known_face_names[best_match_index]
-                            # Optional: Add confidence display
-                            # confidence = 1 - face_distances[best_match_index]
-                            # name += f" ({confidence:.2f})"
-                face_names_detected.append(name)
+            # Update trackers
+            match_faces_to_trackers(face_locations, current_face_encodings)
+            
         except Exception as e:
-            print(f"⚠️ Warning: Error during face recognition in frame: {e}")
-            # Reset detected faces for this frame if error occurs
-            face_locations_detected = []
-            face_names_detected = []
+            print(f"⚠️ Warning: Error during face recognition: {e}")
+    else:
+        # On non-processing frames, just increment missed frames for existing trackers
+        for tracker in face_tracker.values():
+            tracker.increment_missed_frames()
+    
+    # Draw all active trackers
+    for tracker_id, tracker in list(face_tracker.items()):
+        if tracker.is_expired():
+            continue
             
-    process_this_frame = not process_this_frame
-
-    # Display the results (drawing on the original `frame`)
-    for (top, right, bottom, left), name in zip(face_locations_detected, face_names_detected):
-        # Scale back up face locations since the frame we detected in was scaled to 1/4 size
-        top *= 4
-        right *= 4
-        bottom *= 4
-        left *= 4
+        top, right, bottom, left = tracker.location
         
-        # Draw a box around the face
-        cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
-        # Draw a label with a name below the face
-        cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv2.FILLED)
+        # Choose color based on recognition status
+        if tracker.name != "Unknown" and tracker.is_confirmed:
+            color = CV_APC_GREEN_CONFIRMED
+            thickness = 3
+        elif tracker.name != "Unknown":
+            color = CV_APC_YELLOW_TENTATIVE
+            thickness = 2
+        else:
+            color = CV_APC_RED_UNKNOWN
+            thickness = 2
+        
+        # Draw bounding box
+        cv2.rectangle(frame, (left, top), (right, bottom), color, thickness)
+        
+        # Prepare label text
+        label = tracker.name
+        if tracker.confidence_history:
+            avg_confidence = np.mean(tracker.confidence_history)
+            label += f" ({avg_confidence:.2f})"
+        
+        # Draw label background
+        cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+        
+        # Draw label text
         font = cv2.FONT_HERSHEY_DUPLEX
-        cv2.putText(frame, name, (left + 6, bottom - 6), font, 0.6, (255, 255, 255), 1)
+        cv2.putText(frame, label, (left + 6, bottom - 6), font, 0.6, CV_APC_WHITE, 1)
+        
+        # Add tracking ID for debugging
+        cv2.putText(frame, f"ID:{tracker_id}", (left, top - 10), font, 0.4, color, 1)
     
-    update_gui_frame(frame) # Update the video feed in the UI
+    # Add frame info
+    info_text = f"Frames: {frame_count} | Active Trackers: {len(face_tracker)}"
+    cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, CV_APC_WHITE, 2, cv2.LINE_AA)
     
-    # Schedule the next frame processing if the camera is still supposed to be on
+    update_gui_frame(frame)
+    
     if camera_on:
-        video_label.after(15, recognize_and_display_video) # Adjust delay for desired FPS (15ms ~66fps)
+        video_label.after(33, recognize_and_display_video)  # ~30 FPS
 
 def toggle_camera():
     """Turns the webcam ON or OFF and updates the UI accordingly."""
-    global camera_on, video_capture, toggle_button, status_label, video_label
+    global camera_on, video_capture, toggle_button, status_label, video_label, face_tracker
     
-    target_camera_state = not camera_on # Desired state after toggle
+    target_camera_state = not camera_on
     
-    if target_camera_state: # Try to turn ON
+    if target_camera_state:
         print("📹 Turning camera ON...")
-        # Attempt to initialize the webcam (0 is usually the default)
-        video_capture = cv2.VideoCapture(0) 
+        video_capture = cv2.VideoCapture(0)
         if video_capture.isOpened():
-            camera_on = True # Successfully turned on
-            toggle_button.config(text="Turn Off Camera")
-            status_label.config(text="Webcam: Active", fg="blue")
+            # Set camera properties for better performance
+            video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            video_capture.set(cv2.CAP_PROP_FPS, 30)
+            
+            camera_on = True
+            toggle_button.config(text="Turn Off Camera", bg=APC_LIGHT_GOLD, fg=APC_BLUE)
+            status_label.config(text="Webcam: Active", fg=APC_BLUE)
             print("✓ Webcam activated.")
-            # Clear placeholder and start video stream
-            video_label.config(image='', text="") 
-            recognize_and_display_video() # Start the video processing loop
+            
+            # Clear tracking data
+            face_tracker.clear()
+            
+            video_label.config(image='', text="")
+            recognize_and_display_video()
         else:
             print("❌ Error: Could not access webcam to turn ON.")
             messagebox.showerror("Webcam Error", "Could not access webcam. Make sure it's not in use by another application.")
-            # Ensure camera_on remains False, video_capture is None
-            camera_on = False 
-            if video_capture: video_capture.release()
+            camera_on = False
+            if video_capture:
+                video_capture.release()
             video_capture = None
-            toggle_button.config(text="Turn On Camera") # Revert button text
-            status_label.config(text="Webcam: Not Detected/Error", fg="red") # Update status
-    else: # Turn OFF
+            toggle_button.config(text="Turn On Camera", bg=APC_GOLD, fg=APC_BLUE)
+            status_label.config(text="Webcam: Not Detected/Error", fg=APC_DARK_RED_ERROR)
+    else:
         print("📹 Turning camera OFF...")
-        camera_on = False # Set state to off
+        camera_on = False
         if video_capture:
             video_capture.release()
             video_capture = None
-        toggle_button.config(text="Turn On Camera")
-        status_label.config(text="Webcam: Off", fg="black")
         
-        # Display a placeholder image when camera is off
-        placeholder_img = Image.new('RGB', (640, 480), color='lightgray') # Default size
-        # Or use video_label current size if available and non-zero
-        # width = video_label.winfo_width()
-        # height = video_label.winfo_height()
-        # if width > 1 and height > 1:
-        #     placeholder_img = Image.new('RGB', (width, height), color='lightgray')
-            
+        # Clear tracking data
+        face_tracker.clear()
+        
+        toggle_button.config(text="Turn On Camera", bg=APC_GOLD, fg=APC_BLUE)
+        status_label.config(text="Webcam: Off", fg=APC_BLUE)
+        
+        placeholder_img = Image.new('RGB', (640, 480), color=APC_GOLD)
         imgtk = ImageTk.PhotoImage(image=placeholder_img)
         video_label.imgtk = imgtk
-        video_label.configure(image=imgtk, text="Camera Off", compound=tk.CENTER, fg="black", bg="lightgray")
+        video_label.configure(image=imgtk, text="Camera Off", compound=tk.CENTER, fg=APC_BLUE, bg=APC_GOLD)
         print("✓ Webcam deactivated.")
 
 def on_closing_application():
     """Handles application cleanup when the window is closed."""
     global root, camera_on, video_capture
     print("👋 Closing application...")
-    if camera_on: # If camera is on, turn it off gracefully
+    if camera_on:
         if video_capture:
             video_capture.release()
-        camera_on = False # Ensure video loop stops
+        camera_on = False
     
     if root:
-        root.destroy() # Close the Tkinter window
+        root.destroy()
     print("✅ Application shut down successfully!")
-    # cv2.destroyAllWindows() # Generally not needed if Tkinter manages windows and capture is released.
 
 # --- UI Setup ---
 def create_main_ui():
     """Creates and configures the main Tkinter UI."""
     global root, status_label, toggle_button, video_label
 
-    print("🔧 Initializing AttendEase UI...")
+    print("🔧 Initializing Enhanced AttendEase UI...")
     
-    # Load reference face data first. If it fails, the app might be non-functional.
     if not load_reference_data():
         print("❌ Critical error: Could not load reference data. Face recognition will not work.")
-        # Decide if UI should still launch or exit. For now, it will launch with error shown.
-        # Alternatively, could add: return
     
     root = tk.Tk()
-    root.title("AttendEase - Face Recognition v0.1.0")
-    root.geometry("720x650") # Adjusted size for better layout
+    root.title("AttendEase - Enhanced Face Recognition v0.2.0")
+    root.geometry("800x700")
+    root.configure(bg=APC_WHITE)
 
-    # --- Header/Title Label (Optional) ---
-    title_label = tk.Label(root, text="AttendEase System", font=("Helvetica", 16, "bold"))
+    # Header
+    title_label = tk.Label(root, text="AttendEase by Vector Four (DEMO)", font=("Helvetica", 16, "bold"), bg=APC_WHITE, fg=APC_BLUE)
     title_label.pack(pady=(10,0))
 
-    # --- Status Label for Webcam ---
-    status_label = tk.Label(root, text="Webcam: Initializing...", font=("Helvetica", 12))
+    # Status
+    status_label = tk.Label(root, text="Webcam: Initializing...", font=("Helvetica", 12), bg=APC_WHITE, fg=APC_BLUE)
     status_label.pack(pady=(5,10))
 
-    # --- Toggle Camera Button ---
+    # Button
     toggle_button = tk.Button(root, text="Turn On Camera", command=toggle_camera, 
                               font=("Helvetica", 12), width=20, height=2, 
-                              bg="#4CAF50", fg="white", activebackground="#45a049")
+                              bg=APC_GOLD, fg=APC_BLUE, activebackground=APC_LIGHT_GOLD, activeforeground=APC_BLUE,
+                              relief=tk.FLAT, borderwidth=0)
     toggle_button.pack(pady=10)
 
-    # --- Video Display Label ---
-    video_frame = tk.Frame(root, bg="black", bd=2, relief=tk.SUNKEN) # Frame to hold video
+    # Info label
+    info_label = tk.Label(root, text="Enhanced with face tracking and confidence scoring", 
+                         font=("Helvetica", 10), fg=APC_BLUE, bg=APC_WHITE)
+    info_label.pack()
+
+    # Video frame
+    video_frame = tk.Frame(root, bg=APC_BLUE, bd=2, relief=tk.SUNKEN)
     video_frame.pack(pady=10, padx=10, expand=True, fill=tk.BOTH)
     
-    video_label = tk.Label(video_frame, bg="lightgray") # Video frames will be shown here
-    # Set an initial placeholder text/image
-    placeholder_img = Image.new('RGB', (640, 480), color='lightgray')
+    video_label = tk.Label(video_frame, bg=APC_GOLD)
+    placeholder_img = Image.new('RGB', (640, 480), color=APC_GOLD)
     imgtk = ImageTk.PhotoImage(image=placeholder_img)
     video_label.imgtk = imgtk
-    video_label.configure(image=imgtk, text="Camera Off", compound=tk.CENTER, fg="black")
+    video_label.configure(image=imgtk, text="Camera Off", compound=tk.CENTER, fg=APC_BLUE, bg=APC_GOLD)
     video_label.pack(expand=True, fill=tk.BOTH)
     
-    # Perform initial webcam check and update status label
     check_webcam_status()
-
-    # Handle window close event
     root.protocol("WM_DELETE_WINDOW", on_closing_application)
     
-    print("🚀 UI Ready. Press 'Turn On Camera' to start recognition.")
+    print("🚀 Enhanced UI Ready. Features: Face tracking, confidence scoring, stable recognition")
     root.mainloop()
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    # The old safe_face_recognition() function is replaced by create_main_ui()
     create_main_ui() 
