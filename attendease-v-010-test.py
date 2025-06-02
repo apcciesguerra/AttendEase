@@ -20,12 +20,14 @@ root = None
 status_label = None
 toggle_button = None
 video_label = None
+faces_detected_label = None
+recognized_names_display_label = None
 
 # Enhanced tracking variables
 face_tracker = {}  # Dictionary to store face tracking data
 next_face_id = 0
 TRACKING_THRESHOLD = 0.6  # Face recognition confidence threshold
-TRACKING_FRAMES = 10  # Number of frames to keep tracking without detection
+TRACKING_FRAMES = 100  # Number of frames to keep tracking without detection (approx 5s at 30fps)
 FACE_DISTANCE_THRESHOLD = 100  # Maximum pixel distance for face tracking
 
 # Processing optimization
@@ -240,7 +242,8 @@ def update_gui_frame(frame_to_display):
 def recognize_and_display_video():
     """Enhanced face recognition with tracking."""
     global video_capture, camera_on, process_this_frame, video_label
-    global known_face_encodings, known_face_names, frame_count, face_tracker
+    global known_face_encodings, known_face_names, frame_count, face_tracker, faces_detected_label
+    global recognized_names_display_label
 
     if not camera_on or video_capture is None or not video_capture.isOpened():
         return
@@ -319,12 +322,29 @@ def recognize_and_display_video():
     
     update_gui_frame(frame)
     
+    # Update faces detected label
+    if faces_detected_label:
+        num_active_trackers = len(face_tracker)
+        faces_detected_label.config(text=f"Faces Detected: {num_active_trackers}")
+
+    # Update recognized names display label
+    if recognized_names_display_label:
+        current_recognized_names = sorted(list(set(
+            tracker.name for tracker_id, tracker in face_tracker.items()
+            if tracker.name != "Unknown"
+        )))
+        if current_recognized_names:
+            recognized_names_display_label.config(text=", ".join(current_recognized_names))
+        else:
+            recognized_names_display_label.config(text="None")
+
     if camera_on:
         video_label.after(33, recognize_and_display_video)  # ~30 FPS
 
 def toggle_camera():
     """Turns the webcam ON or OFF and updates the UI accordingly."""
-    global camera_on, video_capture, toggle_button, status_label, video_label, face_tracker
+    global camera_on, video_capture, toggle_button, status_label, video_label, face_tracker, faces_detected_label
+    global recognized_names_display_label
     
     target_camera_state = not camera_on
     
@@ -346,6 +366,10 @@ def toggle_camera():
             face_tracker.clear()
             
             video_label.config(image='', text="")
+            if faces_detected_label:
+                faces_detected_label.config(text="Faces Detected: 0")
+            if recognized_names_display_label:
+                recognized_names_display_label.config(text="None")
             recognize_and_display_video()
         else:
             print("❌ Error: Could not access webcam to turn ON.")
@@ -368,6 +392,10 @@ def toggle_camera():
         
         toggle_button.config(text="Turn On Camera", bg=APC_GOLD, fg=APC_BLUE)
         status_label.config(text="Webcam: Off", fg=APC_BLUE)
+        if faces_detected_label:
+            faces_detected_label.config(text="Faces Detected: 0")
+        if recognized_names_display_label:
+            recognized_names_display_label.config(text="None")
         
         placeholder_img = Image.new('RGB', (640, 480), color=APC_GOLD)
         imgtk = ImageTk.PhotoImage(image=placeholder_img)
@@ -391,7 +419,8 @@ def on_closing_application():
 # --- UI Setup ---
 def create_main_ui():
     """Creates and configures the main Tkinter UI."""
-    global root, status_label, toggle_button, video_label
+    global root, status_label, toggle_button, video_label, faces_detected_label
+    global recognized_names_display_label
 
     print("🔧 Initializing Enhanced AttendEase UI...")
     
@@ -399,7 +428,7 @@ def create_main_ui():
         print("❌ Critical error: Could not load reference data. Face recognition will not work.")
     
     root = tk.Tk()
-    root.title("AttendEase - Enhanced Face Recognition v0.2.0")
+    root.title("AttendEase v0.1.0")
     root.geometry("800x700")
     root.configure(bg=APC_WHITE)
 
@@ -407,25 +436,16 @@ def create_main_ui():
     title_label = tk.Label(root, text="AttendEase (DEMO)", font=("Helvetica", 16, "bold"), bg=APC_WHITE, fg=APC_BLUE)
     title_label.pack(pady=(10,0))
 
-    # Status
-    status_label = tk.Label(root, text="Webcam: Initializing...", font=("Helvetica", 12), bg=APC_WHITE, fg=APC_BLUE)
-    status_label.pack(pady=(5,10))
+    # Main content frame for horizontal layout
+    main_horizontal_frame = tk.Frame(root, bg=APC_WHITE)
+    main_horizontal_frame.pack(pady=10, padx=10, expand=True, fill=tk.BOTH)
 
-    # Button
-    toggle_button = tk.Button(root, text="Turn On Camera", command=toggle_camera, 
-                              font=("Helvetica", 12), width=20, height=2, 
-                              bg=APC_GOLD, fg=APC_BLUE, activebackground=APC_LIGHT_GOLD, activeforeground=APC_BLUE,
-                              relief=tk.FLAT, borderwidth=0)
-    toggle_button.pack(pady=10)
+    # Left side: Video feed
+    video_container_frame = tk.Frame(main_horizontal_frame, bg=APC_WHITE)
+    video_container_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 10))
 
-    # Info label
-    info_label = tk.Label(root, text="by Vector Four", 
-                         font=("Helvetica", 10), fg=APC_BLUE, bg=APC_WHITE)
-    info_label.pack()
-
-    # Video frame
-    video_frame = tk.Frame(root, bg=APC_BLUE, bd=2, relief=tk.SUNKEN)
-    video_frame.pack(pady=10, padx=10, expand=True, fill=tk.BOTH)
+    video_frame = tk.Frame(video_container_frame, bg=APC_BLUE, bd=2, relief=tk.SUNKEN)
+    video_frame.pack(expand=True, fill=tk.BOTH)
     
     video_label = tk.Label(video_frame, bg=APC_GOLD)
     placeholder_img = Image.new('RGB', (640, 480), color=APC_GOLD)
@@ -433,6 +453,36 @@ def create_main_ui():
     video_label.imgtk = imgtk
     video_label.configure(image=imgtk, text="Camera Off", compound=tk.CENTER, fg=APC_BLUE, bg=APC_GOLD)
     video_label.pack(expand=True, fill=tk.BOTH)
+
+    # Right side: Controls
+    controls_frame = tk.Frame(main_horizontal_frame, bg=APC_WHITE)
+    controls_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
+
+    toggle_button = tk.Button(controls_frame, text="Turn On Camera", command=toggle_camera,
+                              font=("Helvetica", 12), width=20, height=2,
+                              bg=APC_GOLD, fg=APC_BLUE, activebackground=APC_LIGHT_GOLD, activeforeground=APC_BLUE,
+                              relief=tk.FLAT, borderwidth=0)
+    toggle_button.pack(pady=(0,5))
+
+    status_label = tk.Label(controls_frame, text="Webcam: Initializing...", 
+                           font=("Helvetica", 10), bg=APC_WHITE, fg=APC_BLUE)
+    status_label.pack(pady=(0,10))
+
+    faces_detected_label = tk.Label(controls_frame, text="Faces Detected: 0", 
+                                   font=("Helvetica", 12), bg=APC_WHITE, fg=APC_BLUE)
+    faces_detected_label.pack(pady=5)
+    
+    students_label = tk.Label(controls_frame, text="Recognized Students:",
+                              font=("Helvetica", 10, "bold"), bg=APC_WHITE, fg=APC_BLUE)
+    students_label.pack(pady=(10,0))
+
+    recognized_names_display_label = tk.Label(controls_frame, text="None",
+                                             font=("Helvetica", 10), bg=APC_WHITE, fg=APC_BLUE, wraplength=180, justify=tk.LEFT)
+    recognized_names_display_label.pack(pady=(0,10))
+
+    info_label = tk.Label(controls_frame, text="by Vector Four", 
+                         font=("Helvetica", 10), fg=APC_BLUE, bg=APC_WHITE)
+    info_label.pack(pady=(20,0), side=tk.BOTTOM)
     
     check_webcam_status()
     root.protocol("WM_DELETE_WINDOW", on_closing_application)
