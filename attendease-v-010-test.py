@@ -21,12 +21,11 @@ status_label = None
 toggle_button = None
 video_label = None
 faces_detected_label = None
-recognized_names_display_label = None
 
 # Enhanced tracking variables
 face_tracker = {}  # Dictionary to store face tracking data
 next_face_id = 0
-TRACKING_THRESHOLD = 0.6  # Face recognition confidence threshold
+TRACKING_THRESHOLD = 0.5  # Face recognition confidence threshold. Lower is stricter (default: 0.6)
 TRACKING_FRAMES = 100  # Number of frames to keep tracking without detection (approx 5s at 30fps)
 FACE_DISTANCE_THRESHOLD = 100  # Maximum pixel distance for face tracking
 
@@ -34,9 +33,6 @@ FACE_DISTANCE_THRESHOLD = 100  # Maximum pixel distance for face tracking
 process_this_frame = True 
 frame_count = 0
 last_detection_time = time.time()
-
-# Reference image path
-REFERENCE_IMAGE_PATH = "photos/christian_esguerra.jpg"
 
 # --- Color Palette ---
 APC_GOLD = "#D1A134"
@@ -91,38 +87,49 @@ class FaceTracker:
 # --- Core Functions ---
 
 def load_reference_data():
-    """Loads the reference image and extracts face encodings."""
+    """Loads reference images and extracts face encodings."""
     global known_face_encodings, known_face_names
-    print("📸 Loading reference image...")
-    try:
-        christian_image = face_recognition.load_image_file(REFERENCE_IMAGE_PATH)
-        print("✓ Reference image loaded successfully.")
-        
-        face_encodings_list = face_recognition.face_encodings(christian_image)
-        
-        if not face_encodings_list:
-            error_msg = f"❌ Error: No faces found in the reference image: {REFERENCE_IMAGE_PATH}\n   Please ensure it contains a clear, visible face."
+
+    known_face_encodings = []
+    known_face_names = []
+    
+    reference_people = [
+        ("Christian Esguerra", "photos/christian_esguerra.jpg"),
+        ("Moises Sy", "photos/moises_sy.jpg")
+    ]
+    
+    print("📸 Loading reference images...")
+
+    for name, path in reference_people:
+        print(f"   - Loading {name} from {path}...")
+        try:
+            image = face_recognition.load_image_file(path)
+            face_encodings_list = face_recognition.face_encodings(image)
+
+            if face_encodings_list:
+                encoding = face_encodings_list[0]
+                known_face_encodings.append(encoding)
+                known_face_names.append(name)
+                print(f"     ✓ Face encoding extracted for {name}.")
+            else:
+                print(f"     ⚠️ Warning: No faces found in {path}. Skipping.")
+        except FileNotFoundError:
+            error_msg = f"❌ Error: Reference image not found at '{path}'.\n   Please check the file path."
             print(error_msg)
-            messagebox.showerror("Reference Image Error", error_msg)
+            messagebox.showerror("File Not Found", error_msg)
             return False
-        
-        christian_face_encoding = face_encodings_list[0]
-        known_face_encodings = [christian_face_encoding]
-        known_face_names = ["Christian Esguerra"]
-        
-        print(f"✓ Face encoding extracted. {len(known_face_encodings)} known face(s) configured: {known_face_names}")
-        return True
-        
-    except FileNotFoundError:
-        error_msg = f"❌ Error: Reference image not found at '{REFERENCE_IMAGE_PATH}'.\n   Please check the file path."
-        print(error_msg)
-        messagebox.showerror("File Not Found", error_msg)
-        return False
-    except Exception as e:
-        error_msg = f"❌ Unexpected error loading reference data: {e}"
+        except Exception as e:
+            print(f"     ❌ Error processing {path}: {e}")
+
+    if not known_face_encodings:
+        error_msg = "❌ Error: No valid face encodings were loaded.\n   Please check the reference images."
         print(error_msg)
         messagebox.showerror("Load Error", error_msg)
         return False
+
+    print(f"\n✅ All reference images processed.")
+    print(f"   {len(known_face_encodings)} known face(s) configured: {', '.join(known_face_names)}")
+    return True
 
 def calculate_distance(loc1, loc2):
     """Calculate Euclidean distance between two face locations."""
@@ -243,7 +250,6 @@ def recognize_and_display_video():
     """Enhanced face recognition with tracking."""
     global video_capture, camera_on, process_this_frame, video_label
     global known_face_encodings, known_face_names, frame_count, face_tracker, faces_detected_label
-    global recognized_names_display_label
 
     if not camera_on or video_capture is None or not video_capture.isOpened():
         return
@@ -327,24 +333,12 @@ def recognize_and_display_video():
         num_active_trackers = len(face_tracker)
         faces_detected_label.config(text=f"Faces Detected: {num_active_trackers}")
 
-    # Update recognized names display label
-    if recognized_names_display_label:
-        current_recognized_names = sorted(list(set(
-            tracker.name for tracker_id, tracker in face_tracker.items()
-            if tracker.name != "Unknown"
-        )))
-        if current_recognized_names:
-            recognized_names_display_label.config(text=", ".join(current_recognized_names))
-        else:
-            recognized_names_display_label.config(text="None")
-
     if camera_on:
         video_label.after(33, recognize_and_display_video)  # ~30 FPS
 
 def toggle_camera():
     """Turns the webcam ON or OFF and updates the UI accordingly."""
     global camera_on, video_capture, toggle_button, status_label, video_label, face_tracker, faces_detected_label
-    global recognized_names_display_label
     
     target_camera_state = not camera_on
     
@@ -368,8 +362,6 @@ def toggle_camera():
             video_label.config(image='', text="")
             if faces_detected_label:
                 faces_detected_label.config(text="Faces Detected: 0")
-            if recognized_names_display_label:
-                recognized_names_display_label.config(text="None")
             recognize_and_display_video()
         else:
             print("❌ Error: Could not access webcam to turn ON.")
@@ -394,8 +386,6 @@ def toggle_camera():
         status_label.config(text="Webcam: Off", fg=APC_BLUE)
         if faces_detected_label:
             faces_detected_label.config(text="Faces Detected: 0")
-        if recognized_names_display_label:
-            recognized_names_display_label.config(text="None")
         
         placeholder_img = Image.new('RGB', (640, 480), color=APC_GOLD)
         imgtk = ImageTk.PhotoImage(image=placeholder_img)
@@ -420,7 +410,6 @@ def on_closing_application():
 def create_main_ui():
     """Creates and configures the main Tkinter UI."""
     global root, status_label, toggle_button, video_label, faces_detected_label
-    global recognized_names_display_label
 
     print("🔧 Initializing Enhanced AttendEase UI...")
     
@@ -472,14 +461,6 @@ def create_main_ui():
                                    font=("Helvetica", 12), bg=APC_WHITE, fg=APC_BLUE)
     faces_detected_label.pack(pady=5)
     
-    students_label = tk.Label(controls_frame, text="Recognized Students:",
-                              font=("Helvetica", 10, "bold"), bg=APC_WHITE, fg=APC_BLUE)
-    students_label.pack(pady=(10,0))
-
-    recognized_names_display_label = tk.Label(controls_frame, text="None",
-                                             font=("Helvetica", 10), bg=APC_WHITE, fg=APC_BLUE, wraplength=180, justify=tk.LEFT)
-    recognized_names_display_label.pack(pady=(0,10))
-
     info_label = tk.Label(controls_frame, text="by Vector Four", 
                          font=("Helvetica", 10), fg=APC_BLUE, bg=APC_WHITE)
     info_label.pack(pady=(20,0), side=tk.BOTTOM)
